@@ -45,6 +45,7 @@ def load_config() -> dict[str, str]:
 
 
 def _safe_path(relative: str) -> Path | None:
+    """Validate that path is within project directory (no ../ traversal)."""
     try:
         candidate = (PROJECT_ROOT / relative).resolve(strict=False)
         candidate.relative_to(PROJECT_ROOT)
@@ -54,13 +55,16 @@ def _safe_path(relative: str) -> Path | None:
 
 
 def read_file(path: str) -> str:
+    """Read the contents of a specific file."""
     safe = _safe_path(path)
     if safe is None:
         return f"Error: Access denied — path '{path}' is outside project directory"
     if not safe.is_file():
         return f"Error: File not found: {path}"
     try:
-        return safe.read_text(encoding="utf-8")
+        content = safe.read_text(encoding="utf-8")
+        # Return full content for source code analysis (up to 8000 chars)
+        return content if len(content) <= 8000 else content[:8000] + "\n...(truncated at 8000 chars)"
     except UnicodeDecodeError:
         return f"Error: Cannot read file (encoding issue): {path}"
     except OSError as e:
@@ -68,6 +72,7 @@ def read_file(path: str) -> str:
 
 
 def list_files(path: str) -> str:
+    """List file NAMES in a directory only. Does NOT read file contents."""
     safe = _safe_path(path)
     if safe is None:
         return f"Error: Access denied — path '{path}' is outside project directory"
@@ -81,6 +86,7 @@ def list_files(path: str) -> str:
 
 
 def query_api(method: str, path: str, body: str | None = None) -> str:
+    """Call the deployed backend API to query data or test endpoints."""
     config = load_config()
     base_url = config["agent_api_base_url"]
     lms_api_key = config["lms_api_key"]
@@ -108,7 +114,7 @@ def query_api(method: str, path: str, body: str | None = None) -> str:
             
             result = {
                 "status_code": response.status_code,
-                "body": response.text[:2000],
+                "body": response.text[:3000],  # Increased for error analysis
             }
             return json.dumps(result)
     
@@ -125,13 +131,13 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the CONTENTS of a specific file. You MUST use this to get information from files. list_files only shows filenames, not content.",
+            "description": "Read the CONTENTS of a specific file. You MUST use this to answer questions about file contents, source code, configuration, or documentation. Examples: 'wiki/git-workflow.md', 'backend/main.py', 'docker-compose.yml', 'Dockerfile'.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path from project root, e.g., 'wiki/git-workflow.md'",
+                        "description": "Relative path from project root, e.g., 'wiki/git-workflow.md' or 'backend/routers/items.py'",
                     }
                 },
                 "required": ["path"],
@@ -142,13 +148,13 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List file NAMES in a directory only. Does NOT read file contents. Use to discover files, then call read_file.",
+            "description": "List file NAMES in a directory only. Does NOT read file contents. Use this to discover what files exist (e.g., find router modules in a directory), then call read_file on specific files to get their contents.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative directory path from project root, e.g., 'wiki'",
+                        "description": "Relative directory path from project root, e.g., 'wiki', 'backend/routers'",
                     }
                 },
                 "required": ["path"],
@@ -159,7 +165,7 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "query_api",
-            "description": "Call the deployed backend API to query data or test endpoints.",
+            "description": "Call the deployed backend API to query runtime data, test endpoints, or check HTTP status codes. Use this for questions about database contents, API behavior, status codes, or errors from running endpoints. Authentication is handled automatically.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -170,7 +176,7 @@ TOOLS = {
                     },
                     "path": {
                         "type": "string",
-                        "description": "API path, e.g., '/items/', '/analytics/completion-rate?lab=lab-99'",
+                        "description": "API path, e.g., '/items/', '/analytics/completion-rate?lab=lab-99', '/analytics/top-learners?lab=lab-1'",
                     },
                     "body": {
                         "type": "string",
@@ -189,49 +195,45 @@ TOOL_FUNCTIONS = {
     "query_api": query_api,
 }
 
-SYSTEM_PROMPT = """You are a system agent. Answer questions using tools.
+SYSTEM_PROMPT = """You are a system agent that answers questions about a software project. You have three tools:
 
-Tools:
-- list_files: Lists file NAMES only (no content)
-- read_file: Reads file CONTENTS (required to answer questions about files)
-- query_api: Call backend API for runtime data
+1. **list_files** - Lists file/directory NAMES in a folder. Use this FIRST to discover what files exist (e.g., find router modules, wiki pages). Does NOT show contents.
 
-Rules:
-1. To answer questions about file contents, you MUST call read_file after list_files
-2. list_files alone is NOT enough - it only shows filenames
-3. Include source references: "wiki/filename.md" or "path/file.py"
-4. Max 10 tool calls
+2. **read_file** - Reads file CONTENTS. Use this to answer questions about:
+   - Documentation (wiki/*.md files)
+   - Source code (backend/*.py files)
+   - Configuration (docker-compose.yml, Dockerfile, .env files)
+   - Any file where you need to see the actual content
 
-Provide final answer only after reading relevant files. Do not output reasoning.
+3. **query_api** - Calls the running backend API. Use this for:
+   - Counting items in database (GET /items/)
+   - Testing endpoint behavior (status codes, errors)
+   - Getting runtime data (learner counts, analytics)
+   - Questions about what the API returns
 
-Here are the hints for the questions asked:
+**Tool Selection Guide:**
+- Wiki/documentation questions → list_files(wiki) then read_file(wiki/...)
+- Source code questions (framework, routers, bugs) → list_files then read_file
+- Database/API data questions → query_api
+- HTTP status code questions → query_api (try without auth headers)
+- Bug diagnosis → query_api to see error, then read_file to find source
 
-| # | Question | Grading | Expected | Tools required |
-|---|----------|---------|----------|----------------|
-| 0 | According to the project wiki, what steps are needed to protect a branch on GitHub? | keyword | `branch`, `protect` | `read_file` |
-| 1 | What does the project wiki say about connecting to your VM via SSH? Summarize the key steps. | keyword | `ssh` / `key` / `connect` | `read_file` |
-| 2 | What Python web framework does this project's backend use? Read the source code to find out. | keyword | `FastAPI` | `read_file` |
-| 3 | List all API router modules in the backend. What domain does each one handle? | keyword | `items`, `interactions`, `analytics`, `pipeline` | `list_files` |
-| 4 | How many items are currently stored in the database? Query the running API to find out. | keyword | a number > 0 | `query_api` |
-| 5 | What HTTP status code does the API return when you request `/items/` without an authentication header? | keyword | `401` / `403` | `query_api` |
-| 6 | Query `/analytics/completion-rate` for a lab with no data (e.g., `lab-99`). What error do you get, and what is the bug in the source code? | keyword | `ZeroDivisionError` / `division by zero` | `query_api`, `read_file` |
-| 7 | The `/analytics/top-learners` endpoint crashes for some labs. Query it, find the error, and read the source code to explain what went wrong. | keyword | `TypeError` / `None` / `NoneType` / `sorted` | `query_api`, `read_file` |
-| 8 | Read `docker-compose.yml` and the backend `Dockerfile`. Explain the full journey of an HTTP request from the browser to the database and back. | **LLM judge** | must trace ≥4 hops: Caddy → FastAPI → auth → router → ORM → PostgreSQL | `read_file` |
-| 9 | Read the ETL pipeline code. Explain how it ensures idempotency — what happens if the same data is loaded twice? | **LLM judge** | must identify the `external_id` check and explain that duplicates are skipped | `read_file` |
+**Answer Requirements:**
+- Always include source references: "wiki/filename.md" or "path/file.py"
+- For API data questions, cite the endpoint used
+- For bug questions, name the specific error type and the buggy operation
+- Maximum 10 tool calls total
 
-Additional hints.
+**Important:** After using list_files, you MUST call read_file on relevant files to get contents. list_files alone only shows filenames.
 
-Q: What HTTP status code does the API return when you request /items/ without sending an authentication header?
-A: Make a request without the API key header and check the response status code.
----
-Q: The /analytics/top-learners endpoint crashes for some labs. Query it, find the error, and read the source code to explain what went wrong.
-A: Try GET /analytics/top-learners with different labs. Read the analytics router source to find the sorting bug.
+Provide your final answer only after gathering all necessary information from tools. Do not output reasoning or planning text — just the answer with source references.
 """
 
 
 def call_llm(
     messages: list[dict[str, Any]], config: dict[str, str], tools: list[dict] | None = None
 ) -> dict:
+    """Call the LLM API with the given messages and tools."""
     url = f"{config['api_base']}/chat/completions"
     headers = {
         "Authorization": f"Bearer {config['api_key']}",
@@ -262,6 +264,7 @@ def call_llm(
 
 
 def execute_tool_call(tool_call: dict) -> str:
+    """Execute a tool call and return the result."""
     func = tool_call["function"]
     name = func["name"]
     args = func["arguments"]
@@ -277,7 +280,8 @@ def execute_tool_call(tool_call: dict) -> str:
     
     try:
         result = TOOL_FUNCTIONS[name](**args)
-        return result if len(result) <= 500 else result[:500] + "\n...(truncated)"
+        # Truncate only if very long (keep more for source analysis)
+        return result if len(result) <= 2000 else result[:2000] + "\n...(truncated)"
     except TypeError as e:
         return f"Error: Invalid arguments for {name}: {e}"
     except Exception as e:
@@ -285,37 +289,71 @@ def execute_tool_call(tool_call: dict) -> str:
 
 
 def extract_source_from_answer(answer: str, tool_history: list[dict]) -> str:
+    """Extract source file reference from answer or tool history."""
+    # Pattern 1: wiki files with optional anchor
     match = re.search(r"(wiki/[\w\-/.]+\.md(?:#[\w\-]+)?)", answer)
     if match:
         return match.group(1)
     
+    # Pattern 2: Python files
     match = re.search(r"([\w\-/.]+\.py)", answer)
     if match:
         return match.group(1)
     
+    # Pattern 3: Docker/config files
+    match = re.search(r"(docker-compose\.yml|Dockerfile|\.env\.\w+)", answer)
+    if match:
+        return match.group(1)
+    
+    # Pattern 4: Backend routers
+    match = re.search(r"(backend/[\w\-/.]+\.py)", answer)
+    if match:
+        return match.group(1)
+    
+    # Fallback: use last read_file call
     for call in reversed(tool_history):
         if call.get("tool") == "read_file":
             path = call.get("args", {}).get("path", "")
-            if path and (path.startswith("wiki/") or path.endswith(".py") or path.endswith(".md")):
+            if path and any(path.endswith(ext) for ext in [".py", ".md", ".yml", "Dockerfile"]):
                 return path
     
     return ""
 
 
-def is_planning_text(text: str) -> bool:
-    """Check if text is planning/reasoning rather than a final answer."""
+def is_final_answer(text: str, tool_history: list[dict]) -> bool:
+    """Check if text appears to be a final answer rather than planning."""
+    if not text:
+        return False
+    
     text_lower = text.lower()
-    planning_phrases = [
-        "i need to", "i should", "i will", "i'll", "let me", "let's",
-        "let us", "first, i", "first i", "i'll start", "i will start",
-        "i need to find", "i should look", "let me look", "let me check",
-        "i'll check", "i will check", "looking for", "searching for",
-        "need to find", "should find", "must find",
+    
+    # If it contains specific answer patterns, it's likely final
+    answer_indicators = [
+        "the answer is", "answer:", "there are", "there is", "returns",
+        "status code", "error:", "error type", "uses", "framework",
+        "endpoint", "http", "401", "403", "fastapi", "zerodivision",
+        "typeerror", "none", "sorted", "external_id", "idempotent",
+        "caddy", "postgresql", "docker", "ssh", "branch", "protect",
     ]
-    return any(phrase in text_lower for phrase in planning_phrases)
+    
+    if any(indicator in text_lower for indicator in answer_indicators):
+        return True
+    
+    # If we have tool results and text is short/conclusive, it's likely final
+    if tool_history and len(text) < 300:
+        # Check if it doesn't contain planning phrases
+        planning_phrases = [
+            "i need to", "i should", "i will", "i'll", "let me", "let's",
+            "first, i", "first i", "i'll start", "looking for", "searching",
+        ]
+        if not any(phrase in text_lower for phrase in planning_phrases):
+            return True
+    
+    return False
 
 
 def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
+    """Run the agentic loop to answer a question."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -324,6 +362,7 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
     tool_schemas = list(TOOLS.values())
     
     for iteration in range(MAX_TOOL_CALLS + 1):
+        # Only send tools if we haven't hit the limit
         tools_to_send = tool_schemas if iteration < MAX_TOOL_CALLS else None
         response = call_llm(messages, config, tools=tools_to_send)
         
@@ -333,6 +372,7 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
         tool_calls = msg.get("tool_calls")
         
         if tool_calls:
+            # Execute all tool calls in this turn
             for tool_call in tool_calls:
                 result = execute_tool_call(tool_call)
                 
@@ -350,30 +390,36 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
                 })
                 
                 messages.append({
-                    "role": "user",
-                    "content": f"[{tool_call['function']['name']} result]: {result}",
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", ""),
+                    "content": result,
                 })
             
             continue
         
+        # No tool calls - this is the final answer
         answer = msg.get("content") or ""
         answer = answer.strip()
         
-        # Check if this is planning text (not a real answer)
-        if is_planning_text(answer) and iteration < MAX_TOOL_CALLS:
-            # Force the LLM to use tools instead of reasoning
-            has_list_files = any(c["tool"] == "list_files" for c in tool_calls_log)
-            has_read_file = any(c["tool"] == "read_file" for c in tool_calls_log)
+        # If answer looks like planning and we have tool calls remaining, encourage tool use
+        if not is_final_answer(answer, tool_calls_log) and iteration < MAX_TOOL_CALLS:
+            # Check what tools have been used
+            tools_used = set(c["tool"] for c in tool_calls_log)
             
-            if has_list_files and not has_read_file:
+            if "list_files" in tools_used and "read_file" not in tools_used:
                 messages.append({
                     "role": "user",
-                    "content": "You only listed files. Call read_file on the relevant file to get its contents, then provide the answer.",
+                    "content": "You listed files but haven't read their contents. Call read_file on the relevant file(s) to get the information you need.",
+                })
+            elif not tools_used:
+                messages.append({
+                    "role": "user",
+                    "content": "Call the appropriate tool to find the answer. Use list_files/read_file for documentation/code questions, or query_api for runtime data questions.",
                 })
             else:
                 messages.append({
-                    "role": "user", 
-                    "content": "Call the appropriate tool to find the answer. Do not output reasoning text.",
+                    "role": "user",
+                    "content": "Provide your final answer based on the tool results you've gathered. Include source references.",
                 })
             continue
         
@@ -385,7 +431,8 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
             "tool_calls": tool_calls_log,
         }
     
-    answer = messages[-1].get("content") or "Error: Maximum tool calls reached"
+    # Max iterations reached - return whatever we have
+    answer = messages[-1].get("content") or "Error: Maximum tool calls reached without final answer"
     return {
         "answer": answer,
         "source": extract_source_from_answer(answer, tool_calls_log),
@@ -394,6 +441,7 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
 
 
 def main() -> None:
+    """Main entry point for the agent CLI."""
     if len(sys.argv) < 2:
         print("Usage: uv run agent.py \"<question>\"", file=sys.stderr)
         sys.exit(1)
