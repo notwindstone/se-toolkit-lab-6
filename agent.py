@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 
 # Constants
 MAX_TOOL_CALLS = 10
@@ -21,17 +20,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def load_config() -> dict[str, str]:
-    """Load LLM config from environment."""
-    env_file = PROJECT_ROOT / ".env.agent.secret"
-    if env_file.exists():
-        load_dotenv(env_file)
-
+    """Load LLM config from environment variables.
+    
+    The autochecker injects these directly; .env files are local convenience only.
+    """
     required = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
         print(f"Missing required env vars: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
-
+    
     return {
         "api_key": os.environ["LLM_API_KEY"],
         "api_base": os.environ["LLM_API_BASE"].rstrip("/"),
@@ -209,12 +207,14 @@ TOOL_FUNCTIONS = {"read_file": read_file, "list_files": list_files, "query_api":
 SYSTEM_PROMPT = """You are a documentation agent for a software engineering course.
 Answer questions by reading files in the project wiki (wiki/ directory) and source code.
 
-Rules:
-1. Use list_files to discover available files in a directory.
-2. Use read_file to read specific files and find answers.
-3. Always include the source reference in your final answer: "wiki/filename.md#section-anchor".
-4. If you cannot find the answer, say so honestly.
-5. Maximum 10 tool calls per question.
+CRITICAL RULES:
+1. Use list_files ONLY to discover what files exist in a directory.
+2. ALWAYS use read_file to actually read file contents before answering content questions.
+3. Never answer a question about file contents based only on a file listing — you must read the file.
+4. After listing files, identify which file is most relevant and read it with read_file.
+5. Always include the source reference in your final answer: "wiki/filename.md#section-anchor".
+6. If you cannot find the answer after reading relevant files, say so honestly.
+7. Maximum 10 tool calls per question.
 
 Format your final answer as plain text. Do not include JSON or markdown in your response.
 """
@@ -272,7 +272,7 @@ def execute_tool_call(tool_call: dict) -> str:
         tool_call: Dict with 'function' key containing 'name' and 'arguments'.
     
     Returns:
-        Tool execution result as string (truncated to 500 chars for output).
+        Tool execution result as string (truncated to 2000 chars for output).
     """
     func = tool_call["function"]
     name = func["name"]
@@ -291,7 +291,7 @@ def execute_tool_call(tool_call: dict) -> str:
     try:
         result = TOOL_FUNCTIONS[name](**args)
         # Truncate long results to avoid token limits
-        return result if len(result) <= 500 else result[:500] + "\n...(truncated)"
+        return result if len(result) <= 2000 else result[:2999] + "\n...(truncated)"
     except TypeError as e:
         return f"Error: Invalid arguments for {name}: {e}"
     except Exception as e:
