@@ -78,15 +78,7 @@ def _safe_path(relative: str) -> Path | None:
 
 
 def read_file(path: str) -> str:
-    """Read a file from the project repository.
-    
-    Args:
-        path: Relative path from project root (e.g., 'wiki/git-workflow.md')
-    
-    Returns:
-        File contents as string, or error message if file doesn't exist
-        or path is invalid.
-    """
+    """Read a file from the project repository."""
     safe = _safe_path(path)
     if safe is None:
         return f"Error: Access denied — path '{path}' is outside project directory"
@@ -101,14 +93,7 @@ def read_file(path: str) -> str:
 
 
 def list_files(path: str) -> str:
-    """List files and directories at a given path.
-    
-    Args:
-        path: Relative directory path from project root (e.g., 'wiki')
-    
-    Returns:
-        Newline-separated listing of entries, or error message.
-    """
+    """List files and directories at a given path."""
     safe = _safe_path(path)
     if safe is None:
         return f"Error: Access denied — path '{path}' is outside project directory"
@@ -122,16 +107,7 @@ def list_files(path: str) -> str:
 
 
 def query_api(method: str, path: str, body: str | None = None) -> str:
-    """Call the deployed backend API.
-    
-    Args:
-        method: HTTP method (GET, POST, PUT, DELETE, etc.)
-        path: API path (e.g., '/items/', '/analytics/completion-rate')
-        body: Optional JSON request body as string
-    
-    Returns:
-        JSON string with 'status_code' and 'body' keys, or error message.
-    """
+    """Call the deployed backend API."""
     config = load_config()
     base_url = config["agent_api_base_url"]
     lms_api_key = config["lms_api_key"]
@@ -159,7 +135,7 @@ def query_api(method: str, path: str, body: str | None = None) -> str:
             
             result = {
                 "status_code": response.status_code,
-                "body": response.text[:2000],  # Truncate large responses
+                "body": response.text[:2000],
             }
             return json.dumps(result)
     
@@ -254,32 +230,19 @@ Guidelines:
 - For source code questions: use read_file directly on relevant .py files
 - For runtime data, item counts, status codes, or API behavior: use query_api
 - For bug diagnosis: use query_api to reproduce the error, then read_file to examine the source code
-- Always include source references when answering from files: "wiki/filename.md#section" or "path/to/file.py"
+- Always include source references when answering from files: "wiki/filename.md" or "path/to/file.py"
 - For API queries, mention the endpoint used in your answer
 - Maximum 10 tool calls per question
 - If you cannot find the answer, say so honestly
 
-IMPORTANT: When you have the answer, provide ONLY the final answer with source reference. Do not include your reasoning process.
-Format your final answer as plain text. Do not include JSON or markdown in your response.
+IMPORTANT: Provide ONLY the final answer with source reference. Do not include reasoning or planning text.
 """
 
 
 def call_llm(
     messages: list[dict[str, Any]], config: dict[str, str], tools: list[dict] | None = None
 ) -> dict:
-    """Call the LLM API and return the parsed response.
-    
-    Args:
-        messages: List of message dicts for the chat completion.
-        config: Dict with api_key, api_base, model.
-        tools: Optional list of tool schemas for function calling.
-    
-    Returns:
-        Parsed JSON response from the LLM API.
-    
-    Raises:
-        SystemExit on any error (with message to stderr).
-    """
+    """Call the LLM API and return the parsed response."""
     url = f"{config['api_base']}/chat/completions"
     headers = {
         "Authorization": f"Bearer {config['api_key']}",
@@ -310,19 +273,11 @@ def call_llm(
 
 
 def execute_tool_call(tool_call: dict) -> str:
-    """Execute a tool call and return the result as a string.
-    
-    Args:
-        tool_call: Dict with 'function' key containing 'name' and 'arguments'.
-    
-    Returns:
-        Tool execution result as string (truncated to 500 chars for output).
-    """
+    """Execute a tool call and return the result as a string."""
     func = tool_call["function"]
     name = func["name"]
     args = func["arguments"]
     
-    # Parse arguments if they're a JSON string
     if isinstance(args, str):
         try:
             args = json.loads(args)
@@ -334,7 +289,6 @@ def execute_tool_call(tool_call: dict) -> str:
     
     try:
         result = TOOL_FUNCTIONS[name](**args)
-        # Truncate long results to avoid token limits
         return result if len(result) <= 500 else result[:500] + "\n...(truncated)"
     except TypeError as e:
         return f"Error: Invalid arguments for {name}: {e}"
@@ -343,20 +297,7 @@ def execute_tool_call(tool_call: dict) -> str:
 
 
 def extract_source_from_answer(answer: str, tool_history: list[dict]) -> str:
-    """Extract or infer source reference from answer and tool history.
-    
-    Priority:
-    1. Regex match for wiki/*.md#anchor or *.py pattern in answer text
-    2. Last read_file path from tool history if it starts with 'wiki/' or ends with '.py'
-    3. Empty string if no source can be determined (valid for API-only questions)
-    
-    Args:
-        answer: The LLM's final answer text.
-        tool_history: List of tool calls made during the agentic loop.
-    
-    Returns:
-        Source reference string (e.g., 'wiki/git-workflow.md#section' or 'backend/main.py').
-    """
+    """Extract or infer source reference from answer and tool history."""
     # Pattern: wiki/something.md#anchor or wiki/something.md
     match = re.search(r"(wiki/[\w\-/.]+\.md(?:#[\w\-]+)?)", answer)
     if match:
@@ -394,11 +335,11 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
         choice = response["choices"][0]
         msg = choice["message"]
         
-        # Check for tool calls - this takes priority over content
-        has_tool_calls = msg.get("tool_calls") and len(msg["tool_calls"]) > 0
+        # Check for tool calls
+        tool_calls = msg.get("tool_calls")
         
-        if has_tool_calls:
-            for tool_call in msg["tool_calls"]:
+        if tool_calls:
+            for tool_call in tool_calls:
                 # Execute the tool
                 result = execute_tool_call(tool_call)
                 
@@ -416,11 +357,10 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
                     "result": result,
                 })
                 
-                # Append tool result to messages for LLM context
+                # Append tool result to messages - use "user" role for compatibility
                 messages.append({
-                    "role": "tool",
-                    "content": result,
-                    "tool_call_id": tool_call.get("id", ""),
+                    "role": "user",
+                    "content": f"[{tool_call['function']['name']} result]: {result}",
                 })
             
             # Continue loop to get next LLM response with tool results
@@ -429,19 +369,6 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
         # Final answer (no tool calls)
         answer = msg.get("content") or ""
         answer = answer.strip()
-        
-        # Skip intermediate reasoning - if answer looks like planning, continue
-        if iteration < MAX_TOOL_CALLS and any(phrase in answer.lower() for phrase in [
-            "i need to", "let me", "i should", "i'll", "i will",
-            "first, i", "first i", "let's", "let us",
-        ]):
-            # LLM is still reasoning, but didn't call tools - force it to answer
-            messages.append({
-                "role": "user",
-                "content": "Please provide your final answer now with the source reference. Do not include reasoning.",
-            })
-            continue
-        
         source = extract_source_from_answer(answer, tool_calls_log)
         
         return {
@@ -450,7 +377,7 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
             "tool_calls": tool_calls_log,
         }
     
-    # Max iterations reached — return partial answer
+    # Max iterations reached
     answer = messages[-1].get("content") or "Error: Maximum tool calls reached"
     return {
         "answer": answer,
