@@ -254,11 +254,12 @@ Guidelines:
 - For source code questions: use read_file directly on relevant .py files
 - For runtime data, item counts, status codes, or API behavior: use query_api
 - For bug diagnosis: use query_api to reproduce the error, then read_file to examine the source code
-- Always include source references when answering from files: "wiki/filename.md#section" or "path/to/file.py:line"
+- Always include source references when answering from files: "wiki/filename.md#section" or "path/to/file.py"
 - For API queries, mention the endpoint used in your answer
 - Maximum 10 tool calls per question
 - If you cannot find the answer, say so honestly
 
+IMPORTANT: When you have the answer, provide ONLY the final answer with source reference. Do not include your reasoning process.
 Format your final answer as plain text. Do not include JSON or markdown in your response.
 """
 
@@ -366,11 +367,11 @@ def extract_source_from_answer(answer: str, tool_history: list[dict]) -> str:
     if match:
         return match.group(1)
     
-    # Fallback: use last read_file path
+    # Fallback: use last read_file path from tool history
     for call in reversed(tool_history):
         if call.get("tool") == "read_file":
             path = call.get("args", {}).get("path", "")
-            if path.startswith("wiki/") or path.endswith(".py"):
+            if path and (path.startswith("wiki/") or path.endswith(".py") or path.endswith(".md")):
                 return path
     
     return ""
@@ -393,8 +394,10 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
         choice = response["choices"][0]
         msg = choice["message"]
         
-        # Check for tool calls
-        if "tool_calls" in msg and msg["tool_calls"]:
+        # Check for tool calls - this takes priority over content
+        has_tool_calls = msg.get("tool_calls") and len(msg["tool_calls"]) > 0
+        
+        if has_tool_calls:
             for tool_call in msg["tool_calls"]:
                 # Execute the tool
                 result = execute_tool_call(tool_call)
@@ -414,10 +417,10 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
                 })
                 
                 # Append tool result to messages for LLM context
-                # Use "user" role instead of "tool" for broader API compatibility
                 messages.append({
-                    "role": "user",
-                    "content": f"[{tool_call['function']['name']} result]: {result}",
+                    "role": "tool",
+                    "content": result,
+                    "tool_call_id": tool_call.get("id", ""),
                 })
             
             # Continue loop to get next LLM response with tool results
@@ -426,6 +429,19 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
         # Final answer (no tool calls)
         answer = msg.get("content") or ""
         answer = answer.strip()
+        
+        # Skip intermediate reasoning - if answer looks like planning, continue
+        if iteration < MAX_TOOL_CALLS and any(phrase in answer.lower() for phrase in [
+            "i need to", "let me", "i should", "i'll", "i will",
+            "first, i", "first i", "let's", "let us",
+        ]):
+            # LLM is still reasoning, but didn't call tools - force it to answer
+            messages.append({
+                "role": "user",
+                "content": "Please provide your final answer now with the source reference. Do not include reasoning.",
+            })
+            continue
+        
         source = extract_source_from_answer(answer, tool_calls_log)
         
         return {
