@@ -22,31 +22,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def load_config() -> dict[str, str]:
-    """Load LLM and LMS config from environment files.
-    
-    Reads:
-    - LLM config from .env.agent.secret (LLM_API_KEY, LLM_API_BASE, LLM_MODEL)
-    - LMS config from .env.docker.secret (LMS_API_KEY)
-    - AGENT_API_BASE_URL from environment (default: http://localhost:42002)
-    """
-    # Load LLM config
+    """Load LLM and LMS config from environment files."""
     agent_env = PROJECT_ROOT / ".env.agent.secret"
     if agent_env.exists():
         load_dotenv(agent_env)
     
-    # Load LMS config (for query_api authentication)
     docker_env = PROJECT_ROOT / ".env.docker.secret"
     if docker_env.exists():
         load_dotenv(docker_env, override=False)
     
-    # Required LLM env vars
     llm_required = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
     llm_missing = [k for k in llm_required if not os.environ.get(k)]
     if llm_missing:
         print(f"Missing required LLM env vars: {', '.join(llm_missing)}", file=sys.stderr)
         sys.exit(1)
     
-    # LMS_API_KEY is required for query_api tool
     if not os.environ.get("LMS_API_KEY"):
         print("Missing LMS_API_KEY for query_api authentication", file=sys.stderr)
         sys.exit(1)
@@ -61,14 +51,7 @@ def load_config() -> dict[str, str]:
 
 
 def _safe_path(relative: str) -> Path | None:
-    """Resolve relative path and ensure it stays within project root.
-    
-    Prevents directory traversal attacks by verifying the resolved path
-    is within PROJECT_ROOT.
-    
-    Returns:
-        Absolute Path if valid, None if path traversal attempted.
-    """
+    """Resolve relative path and ensure it stays within project root."""
     try:
         candidate = (PROJECT_ROOT / relative).resolve(strict=False)
         candidate.relative_to(PROJECT_ROOT)
@@ -153,7 +136,7 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file from the project repository. Use to find answers in documentation (wiki/), source code, or configuration files.",
+            "description": "Read the CONTENTS of a specific file. REQUIRED to answer questions about documentation, source code, or configs. You MUST call this after list_files to get actual content. Example: path='wiki/git-workflow.md'",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -170,7 +153,7 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files and directories at a given path. Use to discover available files or explore directory structure.",
+            "description": "List file NAMES in a directory only. Does NOT read file contents. Use this first to discover available files, then use read_file to get contents. Example: path='wiki'",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -221,21 +204,20 @@ SYSTEM_PROMPT = """You are a system agent for a software engineering course proj
 Answer questions by reading files (documentation, source code) and querying the deployed backend API.
 
 Available tools:
-1. list_files — Discover files in a directory (e.g., 'wiki', 'backend/routers')
-2. read_file — Read file contents (documentation in wiki/, source code, configs)
-3. query_api — Call the backend API (GET/POST/etc.) to query data or test endpoints
+1. list_files — Lists file NAMES in a directory. Does NOT read contents. Use first to discover files.
+2. read_file — Reads file CONTENTS. You MUST use this to get actual information from files.
+3. query_api — Call the backend API (GET/POST/etc.) to query data or test endpoints.
 
-Guidelines:
-- For wiki/documentation questions: use list_files to discover files, then read_file to find answers
-- For source code questions: use read_file directly on relevant .py files
-- For runtime data, item counts, status codes, or API behavior: use query_api
-- For bug diagnosis: use query_api to reproduce the error, then read_file to examine the source code
-- Always include source references when answering from files: "wiki/filename.md" or "path/to/file.py"
-- For API queries, mention the endpoint used in your answer
+CRITICAL RULES:
+- list_files ONLY returns filenames, NOT content. You CANNOT answer questions using only list_files.
+- You MUST call read_file on relevant files to get their contents before answering.
+- For wiki/documentation questions: (1) list_files to find files, (2) read_file on relevant files, (3) answer with source
+- For source code questions: read_file on relevant .py files, then answer
+- For runtime data/API questions: use query_api
+- Always include source references: "wiki/filename.md" or "path/to/file.py"
 - Maximum 10 tool calls per question
-- If you cannot find the answer, say so honestly
 
-IMPORTANT: Provide ONLY the final answer with source reference. Do not include reasoning or planning text.
+NEVER answer a question about file contents without calling read_file first.
 """
 
 
@@ -298,17 +280,14 @@ def execute_tool_call(tool_call: dict) -> str:
 
 def extract_source_from_answer(answer: str, tool_history: list[dict]) -> str:
     """Extract or infer source reference from answer and tool history."""
-    # Pattern: wiki/something.md#anchor or wiki/something.md
     match = re.search(r"(wiki/[\w\-/.]+\.md(?:#[\w\-]+)?)", answer)
     if match:
         return match.group(1)
     
-    # Pattern: *.py file reference
     match = re.search(r"([\w\-/.]+\.py)", answer)
     if match:
         return match.group(1)
     
-    # Fallback: use last read_file path from tool history
     for call in reversed(tool_history):
         if call.get("tool") == "read_file":
             path = call.get("args", {}).get("path", "")
@@ -328,22 +307,18 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
     tool_schemas = list(TOOLS.values())
     
     for iteration in range(MAX_TOOL_CALLS + 1):
-        # Don't send tools on last iteration to force final answer
         tools_to_send = tool_schemas if iteration < MAX_TOOL_CALLS else None
         response = call_llm(messages, config, tools=tools_to_send)
         
         choice = response["choices"][0]
         msg = choice["message"]
         
-        # Check for tool calls
         tool_calls = msg.get("tool_calls")
         
         if tool_calls:
             for tool_call in tool_calls:
-                # Execute the tool
                 result = execute_tool_call(tool_call)
                 
-                # Log the tool call for output
                 args = tool_call["function"]["arguments"]
                 if isinstance(args, str):
                     try:
@@ -357,18 +332,30 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
                     "result": result,
                 })
                 
-                # Append tool result to messages - use "user" role for compatibility
                 messages.append({
                     "role": "user",
                     "content": f"[{tool_call['function']['name']} result]: {result}",
                 })
             
-            # Continue loop to get next LLM response with tool results
             continue
         
         # Final answer (no tool calls)
         answer = msg.get("content") or ""
         answer = answer.strip()
+        
+        # Check if agent only used list_files without read_file for file-related questions
+        has_list_files = any(c["tool"] == "list_files" for c in tool_calls_log)
+        has_read_file = any(c["tool"] == "read_file" for c in tool_calls_log)
+        has_query_api = any(c["tool"] == "query_api" for c in tool_calls_log)
+        
+        # If only list_files was used but question is about file contents, force read_file
+        if has_list_files and not has_read_file and not has_query_api:
+            messages.append({
+                "role": "user",
+                "content": "You only listed files but did not read their contents. You MUST call read_file on the relevant file(s) to get the actual content before answering. Please call read_file now.",
+            })
+            continue
+        
         source = extract_source_from_answer(answer, tool_calls_log)
         
         return {
@@ -396,7 +383,6 @@ def main() -> None:
     config = load_config()
     result = run_agent_loop(question, config)
     
-    # Output valid JSON to stdout
     print(json.dumps(result, ensure_ascii=False))
 
 
