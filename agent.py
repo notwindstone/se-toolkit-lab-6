@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Agent CLI — Task 3: The System Agent.
-
-Outputs JSON with 'answer', 'source', and 'tool_calls' fields.
-Implements agentic loop: LLM → tool call → execute → feed back → repeat.
-"""
+"""Agent CLI — Task 3: The System Agent."""
 import json
 import os
 import re
@@ -14,7 +10,6 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
-# Constants
 MAX_TOOL_CALLS = 10
 TIMEOUT_SECONDS = 60
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -50,7 +45,6 @@ def load_config() -> dict[str, str]:
 
 
 def _safe_path(relative: str) -> Path | None:
-    """Resolve relative path and ensure it stays within project root."""
     try:
         candidate = (PROJECT_ROOT / relative).resolve(strict=False)
         candidate.relative_to(PROJECT_ROOT)
@@ -60,7 +54,6 @@ def _safe_path(relative: str) -> Path | None:
 
 
 def read_file(path: str) -> str:
-    """Read a file from the project repository."""
     safe = _safe_path(path)
     if safe is None:
         return f"Error: Access denied — path '{path}' is outside project directory"
@@ -75,7 +68,6 @@ def read_file(path: str) -> str:
 
 
 def list_files(path: str) -> str:
-    """List files and directories at a given path."""
     safe = _safe_path(path)
     if safe is None:
         return f"Error: Access denied — path '{path}' is outside project directory"
@@ -89,7 +81,6 @@ def list_files(path: str) -> str:
 
 
 def query_api(method: str, path: str, body: str | None = None) -> str:
-    """Call the deployed backend API."""
     config = load_config()
     base_url = config["agent_api_base_url"]
     lms_api_key = config["lms_api_key"]
@@ -129,13 +120,12 @@ def query_api(method: str, path: str, body: str | None = None) -> str:
         return json.dumps({"status_code": 0, "body": f"Error: Request failed — {e}"})
 
 
-# Tool schemas for LLM function calling
 TOOLS = {
     "read_file": {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file from the project repository. Use to find answers in documentation or source code.",
+            "description": "Read the CONTENTS of a specific file. You MUST use this to get information from files. list_files only shows filenames, not content.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -152,7 +142,7 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files and directories at a given path. Use to discover available files.",
+            "description": "List file NAMES in a directory only. Does NOT read file contents. Use to discover files, then call read_file.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -169,7 +159,7 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "query_api",
-            "description": "Call the deployed backend API to query data or test endpoints. Use for questions about runtime data, API behavior, or debugging errors.",
+            "description": "Call the deployed backend API to query data or test endpoints.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -199,17 +189,20 @@ TOOL_FUNCTIONS = {
     "query_api": query_api,
 }
 
-SYSTEM_PROMPT = """You are a documentation agent for a software engineering course.
-Answer questions by reading files in the project wiki (wiki/ directory) and source code.
+SYSTEM_PROMPT = """You are a system agent. Answer questions using tools.
+
+Tools:
+- list_files: Lists file NAMES only (no content)
+- read_file: Reads file CONTENTS (required to answer questions about files)
+- query_api: Call backend API for runtime data
 
 Rules:
-1. Use list_files to discover available files in a directory.
-2. Use read_file to read specific files and find answers.
-3. Always include the source reference in your final answer: "wiki/filename.md#section-anchor".
-4. If you cannot find the answer, say so honestly.
-5. Maximum 10 tool calls per question.
+1. To answer questions about file contents, you MUST call read_file after list_files
+2. list_files alone is NOT enough - it only shows filenames
+3. Include source references: "wiki/filename.md" or "path/file.py"
+4. Max 10 tool calls
 
-Format your final answer as plain text. Do not include JSON or markdown in your response.
+Provide final answer only after reading relevant files. Do not output reasoning.
 
 Here are the hints for the questions asked:
 
@@ -235,7 +228,6 @@ A: Make a request without the API key header and check the response status code.
 def call_llm(
     messages: list[dict[str, Any]], config: dict[str, str], tools: list[dict] | None = None
 ) -> dict:
-    """Call the LLM API and return the parsed response."""
     url = f"{config['api_base']}/chat/completions"
     headers = {
         "Authorization": f"Bearer {config['api_key']}",
@@ -266,7 +258,6 @@ def call_llm(
 
 
 def execute_tool_call(tool_call: dict) -> str:
-    """Execute a tool call and return the result as a string."""
     func = tool_call["function"]
     name = func["name"]
     args = func["arguments"]
@@ -290,22 +281,37 @@ def execute_tool_call(tool_call: dict) -> str:
 
 
 def extract_source_from_answer(answer: str, tool_history: list[dict]) -> str:
-    """Extract or infer source reference from answer and tool history."""
     match = re.search(r"(wiki/[\w\-/.]+\.md(?:#[\w\-]+)?)", answer)
+    if match:
+        return match.group(1)
+    
+    match = re.search(r"([\w\-/.]+\.py)", answer)
     if match:
         return match.group(1)
     
     for call in reversed(tool_history):
         if call.get("tool") == "read_file":
             path = call.get("args", {}).get("path", "")
-            if path.startswith("wiki/"):
+            if path and (path.startswith("wiki/") or path.endswith(".py") or path.endswith(".md")):
                 return path
     
     return ""
 
 
+def is_planning_text(text: str) -> bool:
+    """Check if text is planning/reasoning rather than a final answer."""
+    text_lower = text.lower()
+    planning_phrases = [
+        "i need to", "i should", "i will", "i'll", "let me", "let's",
+        "let us", "first, i", "first i", "i'll start", "i will start",
+        "i need to find", "i should look", "let me look", "let me check",
+        "i'll check", "i will check", "looking for", "searching for",
+        "need to find", "should find", "must find",
+    ]
+    return any(phrase in text_lower for phrase in planning_phrases)
+
+
 def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
-    """Run the agentic loop and return the final output."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -320,8 +326,10 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
         choice = response["choices"][0]
         msg = choice["message"]
         
-        if "tool_calls" in msg and msg["tool_calls"]:
-            for tool_call in msg["tool_calls"]:
+        tool_calls = msg.get("tool_calls")
+        
+        if tool_calls:
+            for tool_call in tool_calls:
                 result = execute_tool_call(tool_call)
                 
                 args = tool_call["function"]["arguments"]
@@ -346,6 +354,25 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
         
         answer = msg.get("content") or ""
         answer = answer.strip()
+        
+        # Check if this is planning text (not a real answer)
+        if is_planning_text(answer) and iteration < MAX_TOOL_CALLS:
+            # Force the LLM to use tools instead of reasoning
+            has_list_files = any(c["tool"] == "list_files" for c in tool_calls_log)
+            has_read_file = any(c["tool"] == "read_file" for c in tool_calls_log)
+            
+            if has_list_files and not has_read_file:
+                messages.append({
+                    "role": "user",
+                    "content": "You only listed files. Call read_file on the relevant file to get its contents, then provide the answer.",
+                })
+            else:
+                messages.append({
+                    "role": "user", 
+                    "content": "Call the appropriate tool to find the answer. Do not output reasoning text.",
+                })
+            continue
+        
         source = extract_source_from_answer(answer, tool_calls_log)
         
         return {
@@ -354,7 +381,7 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
             "tool_calls": tool_calls_log,
         }
     
-    answer = messages[-1].get("content", "Error: Maximum tool calls reached") or ""
+    answer = messages[-1].get("content") or "Error: Maximum tool calls reached"
     return {
         "answer": answer,
         "source": extract_source_from_answer(answer, tool_calls_log),
@@ -363,7 +390,6 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Entry point."""
     if len(sys.argv) < 2:
         print("Usage: uv run agent.py \"<question>\"", file=sys.stderr)
         sys.exit(1)
