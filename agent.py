@@ -100,6 +100,47 @@ def list_files(path: str) -> str:
         return f"Error: Cannot list directory: {e}"
 
 
+def query_api(method: str, path: str, body: str | None = None) -> str:
+    """Call the backend API with authentication.
+    
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        path: API path (e.g., '/items/')
+        body: Optional JSON request body
+    
+    Returns:
+        JSON string with status_code and body, or error message.
+    """
+    api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
+    lms_api_key = os.environ.get("LMS_API_KEY")
+    
+    if not lms_api_key:
+        return "Error: LMS_API_KEY not set in environment"
+    
+    url = f"{api_base.rstrip('/')}{path}"
+    headers = {
+        "Authorization": f"Bearer {lms_api_key}",
+        "Content-Type": "application/json",
+    }
+    
+    try:
+        with httpx.Client(timeout=TIMEOUT_SECONDS) as client:
+            if method.upper() == "GET":
+                response = client.get(url, headers=headers)
+            elif method.upper() == "POST":
+                response = client.post(url, headers=headers, content=body or "{}")
+            else:
+                return f"Error: Unsupported method '{method}'"
+            
+            return json.dumps({
+                "status_code": response.status_code,
+                "body": response.text[:2000],  # Truncate for token limits
+            })
+    except httpx.TimeoutException:
+        return f"Error: Request timed out after {TIMEOUT_SECONDS}s"
+    except httpx.RequestError as e:
+        return f"Error: Request failed: {e}"
+
 # Tool schemas for LLM function calling
 TOOLS = {
     "read_file": {
@@ -136,9 +177,34 @@ TOOLS = {
             },
         },
     },
+    "query_api": {
+        "type": "function",
+        "function": {
+            "name": "query_api",
+            "description": "Call the backend LMS API with authentication. Use to query live data, check endpoints, or diagnose bugs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method (GET, POST, etc.)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "API path, e.g., '/items/' or '/analytics/completion-rate?lab=lab-04'",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional JSON request body for POST requests",
+                    },
+                },
+                "required": ["method", "path"],
+            },
+        },
+    },
 }
 
-TOOL_FUNCTIONS = {"read_file": read_file, "list_files": list_files}
+TOOL_FUNCTIONS = {"read_file": read_file, "list_files": list_files, "query_api": query_api}
 
 SYSTEM_PROMPT = """You are a documentation agent for a software engineering course.
 Answer questions by reading files in the project wiki (wiki/ directory) and source code.
