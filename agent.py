@@ -390,9 +390,8 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
                 })
                 
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.get("id", ""),
-                    "content": result,
+                    "role": "user",
+                    "content": f"[{tool_call['function']['name']} result]: {result}",
                 })
             
             continue
