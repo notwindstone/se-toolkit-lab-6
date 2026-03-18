@@ -63,7 +63,7 @@ def is_safe_path(path: str) -> bool:
     try:
         # Resolve the full path
         full_path = (project_root / path).resolve()
-        # Check if it\'s within the project root
+        # Check if it's within the project root
         return str(full_path).startswith(str(project_root))
     except (ValueError, OSError):
         return False
@@ -77,13 +77,13 @@ def read_file(path: str) -> dict[str, Any]:
         path: Relative path from project root.
     
     Returns:
-        dict with \'content\' or \'error\' key.
+        dict with 'content' or 'error' key.
     """
     if not path:
         return {"error": "Path cannot be empty"}
     
     if not is_safe_path(path):
-        return {"error": f"Access denied: path \'{path}\' is outside project directory"}
+        return {"error": f"Access denied: path '{path}' is outside project directory"}
     
     project_root = get_project_root()
     file_path = project_root / path
@@ -99,7 +99,7 @@ def read_file(path: str) -> dict[str, Any]:
     try:
         content = file_path.read_text(encoding="utf-8")
         if len(content) > max_size:
-            content = content[:max_size] + "\\n\\n[... content truncated ...]"
+            content = content[:max_size] + "\n\n[... content truncated ...]"
         return {"content": content}
     except UnicodeDecodeError:
         return {"error": f"Cannot read file (not UTF-8): {path}"}
@@ -115,13 +115,13 @@ def list_files(path: str) -> dict[str, Any]:
         path: Relative directory path from project root.
     
     Returns:
-        dict with \'files\' (newline-separated) or \'error\' key.
+        dict with 'files' (newline-separated) or 'error' key.
     """
     if not path:
         path = "."
     
     if not is_safe_path(path):
-        return {"error": f"Access denied: path \'{path}\' is outside project directory"}
+        return {"error": f"Access denied: path '{path}' is outside project directory"}
     
     project_root = get_project_root()
     dir_path = project_root / path
@@ -137,7 +137,7 @@ def list_files(path: str) -> dict[str, Any]:
         for entry in sorted(dir_path.iterdir()):
             suffix = "/" if entry.is_dir() else ""
             entries.append(f"{entry.name}{suffix}")
-        return {"files": "\\n".join(entries)}
+        return {"files": "\n".join(entries)}
     except PermissionError:
         return {"error": f"Permission denied: {path}"}
 
@@ -152,7 +152,7 @@ def query_api(method: str, path: str, body: str | None = None) -> dict[str, Any]
         body: Optional JSON request body
     
     Returns:
-        dict with \'status_code\' and \'body\' keys.
+        dict with 'status_code' and 'body' keys.
     """
     config = load_config()
     base_url = config["agent_api_base_url"].rstrip("/")
@@ -211,7 +211,7 @@ TOOLS = [
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path from project root (e.g., \'wiki/git-workflow.md\', \'backend/main.py\')",
+                        "description": "Relative path from project root (e.g., 'wiki/git-workflow.md', 'backend/main.py')",
                     },
                 },
                 "required": ["path"],
@@ -228,7 +228,7 @@ TOOLS = [
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative directory path from project root (e.g., \'wiki\', \'backend\'). Use \'.\' for project root.",
+                        "description": "Relative directory path from project root (e.g., 'wiki', 'backend'). Use '.' for project root.",
                     },
                 },
                 "required": ["path"],
@@ -250,7 +250,7 @@ TOOLS = [
                     },
                     "path": {
                         "type": "string",
-                        "description": "API path (e.g., \'/items/\', \'/analytics/completion-rate\')",
+                        "description": "API path (e.g., '/items/', '/analytics/completion-rate')",
                     },
                     "body": {
                         "type": "string",
@@ -286,7 +286,7 @@ You have access to three tools:
 - For questions about documentation, git workflow, or project guidelines: use `read_file` on wiki files
 - For questions about source code, frameworks, or implementation: use `read_file` on source files or `list_files` to discover modules
 - For questions about live data, API behavior, status codes, or database contents: use `query_api`
-- Always use tools to find accurate information - don\'t guess
+- Always use tools to find accurate information - don't guess
 - When you find an answer, include the source (file path with section anchor if applicable)
 - If a tool returns an error, try a different approach or path
 - Maximum 10 tool calls per question
@@ -322,7 +322,7 @@ def run_agent(question: str, config: dict[str, str]) -> dict[str, Any]:
     Run the agentic loop.
     
     Args:
-        question: The user\'s question
+        question: The user's question
         config: Configuration dictionary
     
     Returns:
@@ -405,7 +405,7 @@ def run_agent(question: str, config: dict[str, str]) -> dict[str, Any]:
             answer = msg.content or ""
             
             # Extract source from answer if present (look for source: pattern)
-            source_match = re.search(r"source[:\\s]+([^\\n]+)", answer, re.IGNORECASE)
+            source_match = re.search(r"source[:\s]+([^\n]+)", answer, re.IGNORECASE)
             if source_match:
                 source = source_match.group(1).strip()
             
@@ -447,7 +447,7 @@ def main():
     
     if not args.question:
         print("Error: No question provided", file=sys.stderr)
-        print("Usage: uv run agent.py \\"Your question here\\"", file=sys.stderr)
+        print("Usage: uv run agent.py \"Your question here\"", file=sys.stderr)
         sys.exit(1)
     
     # Load configuration
