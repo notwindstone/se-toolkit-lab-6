@@ -3,7 +3,6 @@
 
 Outputs JSON with 'answer', 'source', and 'tool_calls' fields.
 Implements agentic loop: LLM → tool call → execute → feed back → repeat.
-Adds query_api tool to interact with the deployed backend API.
 """
 import json
 import os
@@ -136,13 +135,13 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the CONTENTS of a specific file. REQUIRED to answer questions about documentation, source code, or configs. You MUST call this after list_files to get actual content. Example: path='wiki/git-workflow.md'",
+            "description": "Read a file from the project repository. Use to find answers in documentation or source code.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path from project root, e.g., 'wiki/git-workflow.md' or 'backend/main.py'",
+                        "description": "Relative path from project root, e.g., 'wiki/git-workflow.md'",
                     }
                 },
                 "required": ["path"],
@@ -153,13 +152,13 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List file NAMES in a directory only. Does NOT read file contents. Use this first to discover available files, then use read_file to get contents. Example: path='wiki'",
+            "description": "List files and directories at a given path. Use to discover available files.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative directory path from project root, e.g., 'wiki' or 'backend/routers'",
+                        "description": "Relative directory path from project root, e.g., 'wiki'",
                     }
                 },
                 "required": ["path"],
@@ -170,7 +169,7 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "query_api",
-            "description": "Call the deployed backend API to query data, check status codes, or test endpoints. Use for questions about runtime data, API behavior, or debugging errors.",
+            "description": "Call the deployed backend API to query data or test endpoints. Use for questions about runtime data, API behavior, or debugging errors.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -200,24 +199,17 @@ TOOL_FUNCTIONS = {
     "query_api": query_api,
 }
 
-SYSTEM_PROMPT = """You are a system agent for a software engineering course project.
-Answer questions by reading files (documentation, source code) and querying the deployed backend API.
+SYSTEM_PROMPT = """You are a documentation agent for a software engineering course.
+Answer questions by reading files in the project wiki (wiki/ directory) and source code.
 
-Available tools:
-1. list_files — Lists file NAMES in a directory. Does NOT read contents. Use first to discover files.
-2. read_file — Reads file CONTENTS. You MUST use this to get actual information from files.
-3. query_api — Call the backend API (GET/POST/etc.) to query data or test endpoints.
+Rules:
+1. Use list_files to discover available files in a directory.
+2. Use read_file to read specific files and find answers.
+3. Always include the source reference in your final answer: "wiki/filename.md#section-anchor".
+4. If you cannot find the answer, say so honestly.
+5. Maximum 10 tool calls per question.
 
-CRITICAL RULES:
-- list_files ONLY returns filenames, NOT content. You CANNOT answer questions using only list_files.
-- You MUST call read_file on relevant files to get their contents before answering.
-- For wiki/documentation questions: (1) list_files to find files, (2) read_file on relevant files, (3) answer with source
-- For source code questions: read_file on relevant .py files, then answer
-- For runtime data/API questions: use query_api
-- Always include source references: "wiki/filename.md" or "path/to/file.py"
-- Maximum 10 tool calls per question
-
-NEVER answer a question about file contents without calling read_file first.
+Format your final answer as plain text. Do not include JSON or markdown in your response.
 """
 
 
@@ -284,14 +276,10 @@ def extract_source_from_answer(answer: str, tool_history: list[dict]) -> str:
     if match:
         return match.group(1)
     
-    match = re.search(r"([\w\-/.]+\.py)", answer)
-    if match:
-        return match.group(1)
-    
     for call in reversed(tool_history):
         if call.get("tool") == "read_file":
             path = call.get("args", {}).get("path", "")
-            if path and (path.startswith("wiki/") or path.endswith(".py") or path.endswith(".md")):
+            if path.startswith("wiki/"):
                 return path
     
     return ""
@@ -313,10 +301,8 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
         choice = response["choices"][0]
         msg = choice["message"]
         
-        tool_calls = msg.get("tool_calls")
-        
-        if tool_calls:
-            for tool_call in tool_calls:
+        if "tool_calls" in msg and msg["tool_calls"]:
+            for tool_call in msg["tool_calls"]:
                 result = execute_tool_call(tool_call)
                 
                 args = tool_call["function"]["arguments"]
@@ -339,23 +325,8 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
             
             continue
         
-        # Final answer (no tool calls)
         answer = msg.get("content") or ""
         answer = answer.strip()
-        
-        # Check if agent only used list_files without read_file for file-related questions
-        has_list_files = any(c["tool"] == "list_files" for c in tool_calls_log)
-        has_read_file = any(c["tool"] == "read_file" for c in tool_calls_log)
-        has_query_api = any(c["tool"] == "query_api" for c in tool_calls_log)
-        
-        # If only list_files was used but question is about file contents, force read_file
-        if has_list_files and not has_read_file and not has_query_api:
-            messages.append({
-                "role": "user",
-                "content": "You only listed files but did not read their contents. You MUST call read_file on the relevant file(s) to get the actual content before answering. Please call read_file now.",
-            })
-            continue
-        
         source = extract_source_from_answer(answer, tool_calls_log)
         
         return {
@@ -364,8 +335,7 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
             "tool_calls": tool_calls_log,
         }
     
-    # Max iterations reached
-    answer = messages[-1].get("content") or "Error: Maximum tool calls reached"
+    answer = messages[-1].get("content", "Error: Maximum tool calls reached") or ""
     return {
         "answer": answer,
         "source": extract_source_from_answer(answer, tool_calls_log),
