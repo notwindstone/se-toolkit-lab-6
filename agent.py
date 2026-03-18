@@ -53,6 +53,16 @@ def _safe_path(relative: str) -> Path | None:
     except (ValueError, RuntimeError):
         return None
 
+def _is_api_runtime_question(question: str) -> bool:
+    """Detect questions that require querying the live API."""
+    keywords = [
+        "status code", "http", "return", "response", "error", 
+        "without authentication", "unauthenticated", "bearer",
+        "how many", "count", "items", "database", "live", "running"
+    ]
+    q_lower = question.lower()
+    return any(kw in q_lower for kw in keywords)
+
 
 def read_file(path: str) -> str:
     """Read a file from the project repository.
@@ -179,22 +189,23 @@ TOOLS = {
         "type": "function",
         "function": {
             "name": "query_api",
-            "description": "Call the backend LMS API with authentication. Use to query live data, check endpoints, or diagnose bugs.",
+            "description": "Call the backend LMS API to discover runtime behavior. USE THIS when the question asks what the API returns, what status code it gives, or how it behaves at runtime. Examples: 'What status code for unauthenticated request?', 'How many items in database?', 'What error for invalid lab?'.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "method": {
                         "type": "string",
-                        "description": "HTTP method (GET, POST, etc.)",
+                        "description": "HTTP method: GET, POST, PUT, DELETE",
+                        "enum": ["GET", "POST", "PUT", "DELETE"]
                     },
                     "path": {
-                        "type": "string",
-                        "description": "API path, e.g., '/items/' or '/analytics/completion-rate?lab=lab-04'",
+                        "type": "string", 
+                        "description": "API path with query string if needed, e.g., '/items/' or '/analytics/completion-rate?lab=lab-99'"
                     },
                     "body": {
                         "type": "string",
-                        "description": "Optional JSON request body for POST requests",
-                    },
+                        "description": "Optional JSON request body for POST/PUT (as raw JSON string)"
+                    }
                 },
                 "required": ["method", "path"],
             },
@@ -204,21 +215,32 @@ TOOLS = {
 
 TOOL_FUNCTIONS = {"read_file": read_file, "list_files": list_files, "query_api": query_api}
 
-SYSTEM_PROMPT = """You are a documentation agent for a software engineering course.
-Answer questions by reading files in the project wiki (wiki/ directory) and source code.
+SYSTEM_PROMPT = """You are a documentation and system agent for a software engineering course.
+Answer questions by reading files OR querying the live API, depending on what the question asks.
 
-CRITICAL RULES:
-1. Use list_files ONLY to discover what files exist in a directory.
-2. ALWAYS use read_file to actually read file contents before answering ANY content question.
-3. Never answer a question about file contents based only on a file listing — you MUST read the file first.
-4. After list_files returns a result, your NEXT action MUST be read_file on the most relevant file(s).
-5. Only give a final answer after you have read at least one file with read_file.
-6. For questions about source code: look in backend/app/ for main.py, routers/*.py, settings.py, pyproject.toml.
-7. For questions about wiki: look in wiki/ directory.
-8. For questions about live data: use query_api with the correct endpoint.
-9. Always include the source reference in your final answer: "path/to/file.md#section" or "backend/app/main.py".
-10. If you cannot find the answer after reading relevant files, say so honestly.
-11. Maximum 10 tool calls per question.
+TOOL SELECTION RULES (CRITICAL):
+1. Use `query_api` when the question asks about:
+   - What the API returns (status codes, response bodies, error messages)
+   - Runtime behavior (e.g., "what happens when...", "what error do you get")
+   - Live data (e.g., "how many items", "what is the score")
+   - Endpoint behavior under specific conditions (e.g., "without authentication")
+
+2. Use `read_file` and `list_files` when the question asks about:
+   - Source code structure, file contents, or configuration
+   - Documentation in the wiki/ directory
+   - What a function does, what a config file contains, how something is implemented
+
+3. NEVER answer a runtime behavior question by reading source code — you must use query_api.
+
+4. After using query_api, if you get an error response, you MAY then use read_file 
+   to examine the source code and explain the bug.
+
+5. Always include the source reference in your final answer:
+   - For wiki/docs: "wiki/filename.md#section-anchor"
+   - For API questions: "API response from GET /path"
+   - For source code: "backend/app/filename.py#line"
+
+6. Maximum 10 tool calls per question.
 
 Format your final answer as plain text. Do not include JSON or markdown in your response.
 """
@@ -339,6 +361,10 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
     
     # Track if we've read any files yet
     has_read_file = False
+
+    if _is_api_runtime_question(question):
+        hint = "\n\n[HINT: This question asks about API runtime behavior. Use query_api to actually call the endpoint and observe the response.]"
+        messages.append({"role": "user", "content": hint})
     
     for iteration in range(MAX_TOOL_CALLS + 1):
         # Force tool usage if we haven't read a file yet and the question requires it
