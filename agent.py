@@ -220,9 +220,10 @@ Here are the hints for the questions asked:
 | 9 | Read the ETL pipeline code. Explain how it ensures idempotency — what happens if the same data is loaded twice? | **LLM judge** | must identify the `external_id` check and explain that duplicates are skipped | `read_file` |
 
 Additional hints.
+
 Q: What HTTP status code does the API return when you request /items/ without sending an authentication header?
 A: Make a request without the API key header and check the response status code.
-
+---
 Q: The /analytics/top-learners endpoint crashes for some labs. Query it, find the error, and read the source code to explain what went wrong.
 A: Try GET /analytics/top-learners with different labs. Read the analytics router source to find the sorting bug.
 """
