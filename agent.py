@@ -209,12 +209,16 @@ Answer questions by reading files in the project wiki (wiki/ directory) and sour
 
 CRITICAL RULES:
 1. Use list_files ONLY to discover what files exist in a directory.
-2. ALWAYS use read_file to actually read file contents before answering content questions.
-3. Never answer a question about file contents based only on a file listing — you must read the file.
-4. After listing files, identify which file is most relevant and read it with read_file.
-5. Always include the source reference in your final answer: "wiki/filename.md#section-anchor".
-6. If you cannot find the answer after reading relevant files, say so honestly.
-7. Maximum 10 tool calls per question.
+2. ALWAYS use read_file to actually read file contents before answering ANY content question.
+3. Never answer a question about file contents based only on a file listing — you MUST read the file first.
+4. After list_files returns a result, your NEXT action MUST be read_file on the most relevant file(s).
+5. Only give a final answer after you have read at least one file with read_file.
+6. For questions about source code: look in backend/app/ for main.py, routers/*.py, settings.py, pyproject.toml.
+7. For questions about wiki: look in wiki/ directory.
+8. For questions about live data: use query_api with the correct endpoint.
+9. Always include the source reference in your final answer: "path/to/file.md#section" or "backend/app/main.py".
+10. If you cannot find the answer after reading relevant files, say so honestly.
+11. Maximum 10 tool calls per question.
 
 Format your final answer as plain text. Do not include JSON or markdown in your response.
 """
@@ -299,22 +303,19 @@ def execute_tool_call(tool_call: dict) -> str:
 
 
 def extract_source_from_answer(answer: str, tool_history: list[dict]) -> str:
-    """Extract or infer source reference from answer and tool history.
-    
-    Priority:
-    1. Regex match for wiki/*.md#anchor pattern in answer text
-    2. Last read_file path from tool history if it starts with 'wiki/'
-    3. Empty string if no source can be determined
-    
-    Args:
-        answer: The LLM's final answer text.
-        tool_history: List of tool calls made during the agentic loop.
-    
-    Returns:
-        Source reference string (e.g., 'wiki/git-workflow.md#section').
-    """
-    # Pattern: wiki/something.md#anchor or wiki/something.md
+    """Extract or infer source reference from answer and tool history."""
+    # Pattern for wiki files
     match = re.search(r"(wiki/[\w\-/.]+\.md(?:#[\w\-]+)?)", answer)
+    if match:
+        return match.group(1)
+    
+    # Pattern for source code files
+    match = re.search(r"(backend/[\w\-/.]+\.py)", answer)
+    if match:
+        return match.group(1)
+    
+    # Pattern for config files
+    match = re.search(r"(pyproject\.toml|docker-compose\.yml|Dockerfile|Caddyfile)", answer)
     if match:
         return match.group(1)
     
@@ -322,9 +323,8 @@ def extract_source_from_answer(answer: str, tool_history: list[dict]) -> str:
     for call in reversed(tool_history):
         if call.get("tool") == "read_file":
             path = call.get("args", {}).get("path", "")
-            if path.startswith("wiki/"):
+            if path and not path.startswith("Error:"):
                 return path
-    
     return ""
 
 
@@ -337,56 +337,67 @@ def run_agent_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
     tool_calls_log: list[dict] = []
     tool_schemas = list(TOOLS.values())
     
+    # Track if we've read any files yet
+    has_read_file = False
+    
     for iteration in range(MAX_TOOL_CALLS + 1):
-        # Don't send tools on last iteration to force final answer
-        tools_to_send = tool_schemas if iteration < MAX_TOOL_CALLS else None
-        response = call_llm(messages, config, tools=tools_to_send)
+        # Force tool usage if we haven't read a file yet and the question requires it
+        needs_file_read = any(kw in question.lower() for kw in ["read", "source code", "wiki", "framework", "use", "implement"])
+        tools_to_send = tool_schemas if (iteration < MAX_TOOL_CALLS and (not has_read_file or needs_file_read)) else None
         
+        response = call_llm(messages, config, tools=tools_to_send)
         choice = response["choices"][0]
         msg = choice["message"]
         
         # Check for tool calls
         if "tool_calls" in msg and msg["tool_calls"]:
             for tool_call in msg["tool_calls"]:
-                # Execute the tool
                 result = execute_tool_call(tool_call)
                 
-                # Log the tool call for output
+                # Track if we read a file
+                if tool_call["function"]["name"] == "read_file":
+                    has_read_file = True
+                
+                # Log the tool call
                 args = tool_call["function"]["arguments"]
                 if isinstance(args, str):
                     try:
                         args = json.loads(args)
                     except json.JSONDecodeError:
                         args = {}
-                
                 tool_calls_log.append({
                     "tool": tool_call["function"]["name"],
                     "args": args,
-                    "result": result,
+                    "result": result[:500] + "..." if len(result) > 500 else result,  # Truncate for logging
                 })
                 
-                # Append tool result to messages for LLM context
-                # Use "user" role instead of "tool" for broader API compatibility
+                # Append tool result to messages
                 messages.append({
                     "role": "user",
                     "content": f"[{tool_call['function']['name']} result]: {result}",
                 })
-            
-            # Continue loop to get next LLM response with tool results
-            continue
+            continue  # Continue loop to get next LLM response
         
-        # Final answer (no tool calls)
+        # Final answer reached
         answer = msg.get("content") or ""
         answer = answer.strip()
-        source = extract_source_from_answer(answer, tool_calls_log)
         
+        # If we haven't read a file but the question requires it, force another iteration
+        if not has_read_file and needs_file_read and iteration < MAX_TOOL_CALLS:
+            messages.append({
+                "role": "user",
+                "content": "You must read at least one file before answering. Use read_file to examine the relevant file contents.",
+            })
+            continue
+        
+        source = extract_source_from_answer(answer, tool_calls_log)
         return {
             "answer": answer,
             "source": source,
             "tool_calls": tool_calls_log,
         }
     
-    # Max iterations reached — return partial answer
+    # Max iterations reached
     answer = messages[-1].get("content", "Error: Maximum tool calls reached") or ""
     return {
         "answer": answer,
