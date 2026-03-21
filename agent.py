@@ -39,7 +39,7 @@ def load_config():
         "model": os.environ.get("LLM_API_MODEL", ""),
         "lms_api_key": os.environ.get("LMS_API_KEY", ""),
         # why need this?
-        # "agent_api_base_url": os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002").rstrip("/"),
+        "agent_api_base_url": os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002").rstrip("/"),
     }
 
 
