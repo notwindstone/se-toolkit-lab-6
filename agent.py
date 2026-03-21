@@ -38,8 +38,6 @@ def load_config():
         "api_base": os.environ.get("LLM_API_BASE_URL", "").rstrip("/"),
         "model": os.environ.get("LLM_API_MODEL", ""),
         "lms_api_key": os.environ.get("LMS_API_KEY", ""),
-        # why need this?
-        "agent_api_base_url": os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002").rstrip("/"),
     }
 
 
@@ -86,7 +84,7 @@ def query_api(method, path, body=None):
     """Call the deployed backend API with authentication."""
     try:
         config = load_config()
-        base_url = config["agent_api_base_url"]
+        base_url = config["api_base"]
         lms_api_key = config["lms_api_key"]
         url = base_url + path
         headers = {
