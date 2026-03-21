@@ -88,7 +88,7 @@ def query_api(method, path, body=None):
         lms_api_key = config["lms_api_key"]
         url = base_url + path
         headers = {
-            "Authorization": "Bearer " + lms_api_key,
+            "Authorization": "Bearer " + config["api_key"],
             "Content-Type": "application/json",
         }
         
